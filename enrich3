@@ -1,1 +1,32 @@
+suppressMessages({
+library(Seurat)
+library(dplyr)
+library(stringr)
+library(tidyverse)
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+library(clusterProfiler) #GO,KEGG,GSEA
+library(enrichplot) #GO,KEGG,GSEA
+library(GSEABase) #GSEA
+library(GSVA) #GSVS
+library(DOSE) #Gene ID conversion
+library(topGO)
+#library(pathview) 
+library(msigdbr) 
+library(pheatmap)
+library(SeuratData)
+})
+#InstallData("pbmc3k")  # 获取测试数据
+#data("pbmc3k")  #完成数据集的加载
+#pbmc3k.final = UpdateSeuratObject(object = pbmc3k.final)  #如果数据加载不出来对"pbmc3k.final"对象进行更新
+#saveRDS(pbmc3k.final,file="PBMC.rds")
+#读数据
+pbmc<-readRDS('/vip_training/ceshi/qijia1/GO_KEGG/PBMC.rds')
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5)
+pbmc@meta.data$celltype <- pbmc@active.ident
+head(pbmc@meta.data)
+head(pbmc@active.ident)
+head(pbmc@meta.data)
+table(pbmc@meta.data$seurat_annotations) #统计细胞类型及对应的细胞数
+?FindMarkers
 
