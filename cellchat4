@@ -1,0 +1,243 @@
+suppressMessages ({
+library(Seurat) 
+library(CellChat)  
+library(ggplot2)  
+library(ggalluvial)  
+library(NMF)
+library(dplyr)
+    })
+packageVersion('CellChat')
+PRO<-readRDS('/data/singlecell/pbmc3k_human/pbmc3k.final.rds') 
+Idents(PRO)<-'orig.ident'
+# 提取要分析的样本（组），按不同的处理组分开单独分析
+#PRO<-subset(PRO,idents = 'xxx') #由于该测试数据只有一个样本，所以不需要执行此步骤
+# 去掉不参与分析的细胞类型
+#Idents(PRO)<-'seurat_annotations'
+#PRO<-subset(PRO,idents = 'xxx',invert=TRUE) #该测试数据的所有的细胞类型都参与分析，此步可省略
+head(PRO@meta.data)
+Idents(PRO)<-'seurat_annotations'
+table(Idents(PRO))
+cellchat <- createCellChat(object = PRO)
+dim(cellchat@data)  #cellchat@data.raw为空
+#统计细胞分群
+groupSize <- as.numeric(table(cellchat@idents))
+groupSize
+cellchat@meta    #原PRO的meta.data加上ident列
+CellChatDB <- CellChatDB.human    #CellChatDB.mouse CellChatDB.zebrafish
+#CellChatDB$interaction: 互作对信息
+#CellChatDB$geneInfo：基因信息
+#CellChatDB$complex：多聚复合物的亚基
+#CellChatDB$cofactor：辅助因子
+#直接展示CellChatDB可能卡死
+showDatabaseCategory(CellChatDB)
+#根据CellChatDB$interaction表画出来
+#取出相应分类用作分析数据库,可选择自己感兴趣的通路分析，一般选择Secreted Signaling
+CellChatDB.use <- subsetDB(CellChatDB, search = "Secreted Signaling")
+#将数据库内容载入cellchat对象中，即设置接下来的参考数据库
+cellchat@DB <- CellChatDB.use
+dim(cellchat@DB$interaction)   #数据库包含1281个互作对，属于158条通路
+length(unique(cellchat@DB$interaction$pathway_name))
+cellchat <- subsetData(cellchat)
+#从原始单细胞数据中筛选出预定义的信号基因（如配体-受体对、细胞通讯相关基因），生成一个仅包含信号基因的子集数据，减少噪音和非相关基因的干扰。
+#后续的细胞通讯网络分析（如推断相互作用、可视化）将基于这个子集进行。
+dim(cellchat@data)
+dim(cellchat@data.signaling)   #筛选后矩阵剩余287个基因
+rownames(cellchat@data.signaling)
+#数据库中涉及的基因列表
+cellchat <- identifyOverExpressedGenes(cellchat)   
+#寻找高表达基因
+#结果存储在cellchat@var.features$features, $features.info，记录了每个cluster的差异基因
+
+length(cellchat@var.features$features)             #筛选后的矩阵有287个基因，至少在一个cluster中为差异基因的基因有252个
+head(cellchat@var.features$features)
+
+dim(cellchat@var.features$features.info)           #每个cluster中的差异基因相加共462个，有重复
+head(cellchat@var.features$features.info)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+#基于表达量筛选出候选的配体-受体对，结果存储在cellchat@LR$LRsig
+cellchat@LR$LRsig
+dim(cellchat@LR$LRsig)   #完整数据库共1281个互作对，属于158条通路。配/受体为高变基因的互作对共135个，属于47条通路。
+length(unique(cellchat@LR$LRsig$pathway_name))
+cellchat <- smoothData(cellchat, adj = PPI.human)
+#cellchat <- projectData(cellchat, adj = PPI.human)
+#旧版本中函数名为projectData
+#把CellChat之前识别到的配体受体基因（保存在cellchat@LR$LRsig）投影到PPI网络（蛋白质互作网络，如PPI.human）中，以对原始表达矩阵进行数据平滑（smooth），
+#即借助高置信度的蛋白间互作，补全浅测序导致的零值基因，从而恢复信号，减少drop-out的影响，提高推断可靠性。结果保存在@data.smooth。
+head(cellchat@data.smooth)
+dim(cellchat@data.smooth)
+#cellchat@data.project:经过平滑后的表达矩阵，降低单细胞数据的随机噪声
+#PPI.human:稀疏矩阵
+dim(PPI.human)
+PPI.human[0:30,0:30]
+#计算细胞类型之间相互作用的通信概率/强度；要运行几分钟
+#大致算法：cellchat会计算配体基因在配体细胞中的平均表达量，乘以受体基因在受体细胞中的平均表达量，算出通讯强度的3维数组prob。并用置换检验算出3维数组pval。
+
+#细节1：CellChat的平均表达量默认使用四分位截尾平均，减小极端值影响。
+#细节2：对于多亚基复合物的配体/受体，CellChat会调用cellchat@DB$complex，计算各亚基表达量的几何平均（如3个表达乘积再开三次方根）。
+#细节3：对于cellchat@DB$interaction中存在共调节因子的互作对，调用celllchat@DB$cofactor，按共刺激/共抑制受体/激动剂/拮抗剂的表达量修正强度。
+#共调节因子：共刺激受体(co_A_receptor, RA)、共抑制受体(co_I_receptor, RI)、激动剂(agonist, AG)、抑制剂(antagonist, AN)
+#细节4：应用Hill函数，反映饱和效应。
+#细节5：考虑细胞群比例，乘以细胞群权重(population.size=TRUE)。
+
+
+cellchat <- computeCommunProb(cellchat,raw.use=TRUE)
+#cellchat <- computeCommunProb(cellchat,raw.use=FALSE)
+#raw.use默认为TRUE，使用data.signaling。如要使用平滑过的data.smooth，需要设置raw.use=FALSE。
+#使用data.smooth，显著互作对数量会比使用data.signaling增多。结果在cellchat@net$prob。
+#下文注释里的数据是用data.signaling(raw.use=TRUE)计算的。
+cellchat@options$datatype
+cellchat@options$mode
+cellchat@options$run.time
+cellchat@options$parameter
+head(cellchat@net$prob)
+dim(cellchat@net$prob)    #细胞类型之间的推断作用强度    3维数组，维度1：source  维度2：target   维度3：配受体对  9*9*135
+dim(cellchat@net$pval)    #维度与prob一样
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+#过滤掉小于10个细胞的细胞类型的相关通讯，此处细胞数量都大于10，不会被过滤
+dim(cellchat@net$prob)
+df.net <- subsetCommunication(cellchat)   
+#从cellchat@net中筛选source-target-互作对组合，默认筛选条件为thresh = 0.05，即p值小于0.05
+head(df.net)
+dim(df.net)   #共有155个配体-受体-互作对的组合有显著性
+table(as.character(df.net$interaction_name))   #155个组合中，互作对有10种
+table(df.net$pathway_name)                     #这10个互作对属于6条通路
+table(df.net$source)
+table(df.net$target)
+write.csv(df.net,'/vip_training/311/fengchenbo/cellchat/net_lr.csv')
+df.net1 <- subsetCommunication(cellchat, sources.use = c('Naive CD4 T','Memory CD4 T'), targets.use = c(4,5))
+#筛选source和target为特定细胞类型的、有显著性的通讯。数字表示细胞类型，按cellchat ident的levels顺序。也可以直接填细胞类型名。
+table(df.net1$source)
+table(df.net1$target)
+levels(cellchat@meta$ident)
+df.net1
+df.net2 <- subsetCommunication(cellchat, signaling = c("MIF","IL16"))
+#筛选特定通路的显著性通讯
+df.net3 <- subsetCommunication(cellchat, pairLR.use = data.frame(interaction_name = c("MIF_CD74_CXCR4","MIF_CD74_CD44")))
+#筛选特定互作对的显著性通讯
+#pairLR.use需要输入一个1列的数据框，列名为interaction_name或pathway_name
+#或者也可以从df.net出发筛选，不用subsetCommunication函数
+cellchat <- computeCommunProbPathway(cellchat)
+#推断信号通路水平的细胞通讯网络（computeCommunProb推断的是相互作用水平的通讯）；结果存储在cellchat@netP$prob，不会计算p值，即没有cellchat@netP$pval。
+#不会重新计算p值，筛选时会只保留“至少有一个互作对有显著性”的通路与细胞类型对的组合（source-target-pathway）
+#prob：把net中对应细胞类型对、属于通路的所有互作对的prob相加得到
+table(cellchat@LR$LRsig$pathway_name)
+length(unique(cellchat@LR$LRsig$pathway_name))
+#数据库中筛选出的相互作用对共来自47条通路
+#查看computeCommunProbPathway的结果
+cellchat@netP$pathways
+dim(cellchat@netP$prob)
+head(cellchat@netP$prob)
+#47条通路中，只有6条通路包含至少1个有显著性的相互作用
+df.netP<-subsetCommunication(cellchat,slot.name='netP')
+#默认根据p值<0.05筛选，筛选函数跟互作对水平的一样，但将slot.name从默认的"net"改为"netP"。
+df.netP
+write.csv(df.netP,'/vip_training/311/fengchenbo/cellchat/net_pathway.csv')
+#统计细胞类型间的通讯数量(配体-受体对的个数)和强度(概率)
+cellchat <- aggregateNet(cellchat)
+cellchat@net$count
+sum(cellchat@net$count)
+#细胞类型间的显著互作对数量，总和等于df.net的行数。
+cellchat@net$weight
+#细胞类型间的互作强度
+df.net4 <- subsetCommunication(cellchat, sources.use = c(3), targets.use = c(2))
+df.net4
+sum(df.net4$prob)
+#CD14+ Mono到Memory CD4 T的相互作用，共有4种，cellchat@net$weight为4种相互作用的prob之和
+groupSize
+#各细胞类型的细胞数
+#用cellchat@net$count画图，顶点大小与此细胞类型的细胞数有关
+netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+#用cellchat@net$weight画图
+netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name =  "Interaction weights/strength")
+#展示每个细胞类型的互作强度，也可以把weigh换成count
+mat <- cellchat@net$weight
+
+par(mfrow = c(3,3), xpd=TRUE)
+for (i in 1:nrow(mat)) {
+#建立0矩阵
+mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames =  dimnames(mat))
+#将完整weight矩阵第i行赋给单个类型的矩阵
+mat2[i, ] <- mat[i, ]
+netVisual_circle(mat2, vertex.weight = groupSize, weight.scale =  T,edge.weight.max = max(mat), vertex.label.cex = 0.2,title.name =  rownames(mat)[i])
+}
+mat2
+#以MIF通路为例（前期实验中找到了一些信号通路的差异，可以在细胞水平上验证）
+
+#查看有显著性的通路
+cellchat@netP$pathways 
+#选择其中一条通路展示
+pathways.show <- c("MIF") 
+
+netVisual_aggregate(cellchat, signaling = pathways.show)   #网络图形式展示
+netVisual_aggregate(cellchat, signaling = pathways.show, layout = "chord")  # 和弦图形式展示
+netVisual_heatmap(cellchat, signaling = pathways.show, color.heatmap = "Reds")  # 热图形式展示
+# MIF通路中的配受体对
+pairLR.MIF <- extractEnrichedLR(cellchat, signaling = pathways.show, geneLR.return = FALSE) 
+head(pairLR.MIF)
+# 选择第一行的配受体对进行展示
+LR.show <- pairLR.MIF[1,] 
+# Hierarchy plot层次聚类图
+vertex.receiver = seq(1,4)  # 一个向量数字，表示在前4种细胞类型种查看
+netVisual_individual(cellchat, signaling = pathways.show, pairLR.use = LR.show, vertex.receiver =
+vertex.receiver,layout = "hierarchy")  #如果想把图画成其它的形状，可以在layout参数中进行修改
+#实心圆是信号起始细胞群，空心圆是信号接受细胞群。
+#左图：Naive CD4 T, Memory CD4 T, CD14+ Mono，B作为信号接收细胞群；左半图的横线为自分泌信号。细胞释放的信号作用于自身的细胞类别。
+#右图：其它5种细胞群作为信号接受细胞群；右半图的横线为自分泌信号。
+netVisual_bubble(cellchat, sources.use = 2, targets.use = c(3:7)) 
+# 可以用signaling的参数指定自己关注的通路
+netVisual_bubble(cellchat, sources.use = 2, targets.use = c(3:7), signaling ='MIF')
+#利用seurat包装的函数plotGeneExpression绘制与L-R对或信号通路相关的信号基因的基因表达分布图
+plotGeneExpression(cellchat, signaling = "MIF")
+unique(df.net[df.net$pathway_name=='MIF',c("ligand","receptor")])
+#MIF通路涉及到4个基因
+#2个互作对的受体都是异聚复合物，可在cellchat@DB$complex['CD74_CD44']中查看组成
+pathways.show <- c("MIF")
+netAnalysis_contribution(cellchat, signaling = pathways.show)
+# “netP”槽中存储着推断出的细胞间信号通路通信网络
+cellchat <- netAnalysis_computeCentrality(cellchat, slot.name = "netP") 
+#计算细胞通讯网络中节点（细胞群）的中心性指标，结果存储在cellchat@netP$centr，计算得到：
+#incoming,outgoing,betweenness, closeness, eigen/page_rank
+#MIF信号通路中各个细胞类型扮演的角色：
+#发送者sender（outdeg）;接收者receiver（indeg高）,调节者moderator（betweenness高）,影响者influencer（eigen/pagerank高）
+netAnalysis_signalingRole_network(cellchat, signaling = pathways.show, width = 8, height = 2.5, font.size = 10)  #热图
+netAnalysis_signalingRole_scatter(cellchat, signaling = pathways.show)  #分散点图
+#netAnalysis_computeCentrality的结果
+cellchat@netP$centr[[1]]
+#  计算分解成几个因子(pattern)比较合适，该步运行非常慢
+selectK(cellchat, pattern = "outgoing")
+#根据Cophenetic和Silhouette选取划分模式的数量，这两个值越高，聚类一致性越好，且模式划分越清晰。
+#在保证两个值最高的前提下选择最大的nPattern。因此选择拐点（急剧下降）前的最大nPattern值；模式不宜过多。
+#模式即将细胞类型和通路聚类，寻找在通讯方面相似的细胞类型集合和通路集合，如Pattern1细胞类型在Pattern1通路通讯频繁，Pattern2细胞类型在Pattern2通路通讯频繁
+nPatterns = 3  #挑选上图中第一个下降点前的上一个点对应横坐标，这里选择3
+
+#展示不同的细胞类型和通路被分配到哪个模式
+cellchat <- identifyCommunicationPatterns(cellchat, pattern = "outgoing", k = nPatterns) 
+#结果保存在cellchat@netP$pattern$outgoing$pattern,有cell和signaling两个表，
+#展示了发出信号的cluster如何协同工作，以及它们如何通过特定信号通路进行通讯
+netAnalysis_river(cellchat, pattern = "outgoing") #桑基图
+#对于某细胞类型，Contribution最高的Pattern设置为此类型的Pattern
+cellchat@netP$pattern$outgoing$pattern$cell
+#对通路同理：cellchat@netP$pattern$outgoing$pattern$signaling
+cellchat@netP$pattern$outgoing$pattern$signaling
+#生成按pattern排列细胞类型/通路的向量，先排最后所有Pattern1的细胞类型/通路，再排所有Pattern2的细胞类型/通路，以此类推
+cell_pattern_order <- cellchat@netP$pattern$outgoing$pattern$cell %>%
+  group_by(CellGroup) %>%                                #按细胞类型分组
+  slice_max(Contribution, n = 1, with_ties = FALSE) %>%  #选出最大贡献的那一行
+  ungroup() %>%
+  arrange(Pattern, CellGroup) %>%                        #先按 Pattern 排序，再按 CellGroup
+  pull(CellGroup)                                        #提取CellGroup列为向量
+
+pathway_pattern_order <- cellchat@netP$pattern$outgoing$pattern$signaling %>%
+  group_by(Signaling) %>%                                
+  slice_max(Contribution, n = 1, with_ties = FALSE) %>%  
+  ungroup() %>%
+  arrange(Pattern, Signaling) %>%                        
+  pull(Signaling)                                       
+
+cell_pattern_order
+pathway_pattern_order
+#点图，对每个细胞类型，筛选Contribution较大的通路画点
+#用group.show和pathway.show设置细胞类型和通路的展示顺序，cell_pattern_order和pathway_pattern_order是按Pattern排序过的。
+#画出的点图近似”块对角“形式，即只在对角线附近有点
+netAnalysis_dot(cellchat, pattern = "outgoing", group.show = cell_pattern_order, pathway.show = pathway_pattern_order)  #点图
+saveRDS(cellchat, file = "/vip_training/311/fengchenbo/cellchat/cellchat.rds")
