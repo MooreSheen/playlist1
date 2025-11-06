@@ -1,0 +1,319 @@
+conda create -y -n cell2loc python=3.9
+
+conda activate cell2loc
+pip install cell2location[tutorials]
+mamba install -y nb_conda_kernels ipykernel
+python -m ipykernel install --user --name cell2loc --display-name cell2loc
+import scanpy as sc
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+
+import cell2location
+
+from matplotlib import rcParams
+rcParams['pdf.fonttype'] = 42 # enables correct plotting of text for PDFs
+adata_st = sc.read_h5ad('Step1.brain_st_cortex.h5ad')
+adata_st
+ AnnData object with n_obs × n_vars = 1075 × 31053
+    obs: 'in_tissue', 'array_row', 'array_col', 'orig.ident', 'nCount_Spatial', 'nFeature_Spatial', 'slice', 'region', 'id', 'Spatial_snn_res.0.8', 'seurat_clusters', 'keep_idx'
+    var: 'vst.mean', 'vst.variance', 'vst.variance.expected', 'vst.variance.standardized', 'vst.variable'
+    uns: 'seurat_clusters_colors', 'spatial'
+    obsm: 'X_pca', 'X_umap', 'spatial'
+sc.pl.spatial(adata_st, color='seurat_clusters')
+# find mitochondria-encoded (MT) genes
+adata_st.var['MT_gene'] = [gene.startswith('mt-') for gene in adata_st.var.index]
+
+# remove MT genes for spatial mapping (keeping their counts in the object)
+adata_st.obsm['MT'] = adata_st[:, adata_st.var['MT_gene'].values].X.toarray()
+adata_st = adata_st[:, ~adata_st.var['MT_gene'].values]
+adata_st
+ View of AnnData object with n_obs × n_vars = 1075 × 31040
+    obs: 'in_tissue', 'array_row', 'array_col', 'orig.ident', 'nCount_Spatial', 'nFeature_Spatial', 'slice', 'region', 'id', 'Spatial_snn_res.0.8', 'seurat_clusters', 'keep_idx'
+    var: 'vst.mean', 'vst.variance', 'vst.variance.expected', 'vst.variance.standardized', 'vst.variable', 'MT_gene'
+    uns: 'seurat_clusters_colors', 'spatial'
+    obsm: 'X_pca', 'X_umap', 'spatial', 'MT'
+adata_ref = sc.read_h5ad('Step1.brain_sc.h5ad')
+adata_ref
+ AnnData object with n_obs × n_vars = 4785 × 34617
+    obs: 'orig.ident', 'nCount_RNA', 'nFeature_RNA', 'sample_id', 'sample_type', 'organism', 'donor', 'sex', 'age_days', 'eye_condition', 'genotype', 'driver_lines', 'reporter_lines', 'brain_hemisphere', 'brain_region', 'brain_subregion', 'injection_label_direction', 'injection_primary', 'injection_secondary', 'injection_tract', 'injection_material', 'injection_exclusion_criterion', 'facs_date', 'facs_container', 'facs_sort_criteria', 'rna_amplification_set', 'library_prep_set', 'library_prep_avg_size_bp', 'seq_name', 'seq_tube', 'seq_batch', 'total_reads', 'percent_exon_reads', 'percent_intron_reads', 'percent_intergenic_reads', 'percent_rrna_reads', 'percent_mt_exon_reads', 'percent_reads_unique', 'percent_synth_reads', 'percent_ecoli_reads', 'percent_aligned_reads_total', 'complexity_cg', 'genes_detected_cpm_criterion', 'genes_detected_fpkm_criterion', 'tdt_cpm', 'gfp_cpm', 'class', 'subclass', 'cluster', 'confusion_score', 'cluster_correlation', 'core_intermediate_call', 'id', 'cell_type', 'dbscan_filter'
+    var: 'vst.mean', 'vst.variance', 'vst.variance.expected', 'vst.variance.standardized', 'vst.variable'
+    obsm: 'X_pca', 'X_umap'
+sc.settings.set_figure_params(dpi=100, dpi_save=300, figsize=(4, 4))
+sc.pl.umap(adata_ref, color='seurat_clusters')
+from cell2location.utils.filtering import filter_genes
+selected = filter_genes(adata_ref, cell_count_cutoff=5, cell_percentage_cutoff2=0.03, nonz_mean_cutoff=1.12)
+
+# filter the object
+adata_ref = adata_ref[:, selected].copy()
+# prepare anndata for the regression model
+cell2location.models.RegressionModel.setup_anndata(adata=adata_ref,
+                         batch_key='orig.ident', # 10X reaction / sample / batch
+                         labels_key='cell_type' # cell type, covariate used for constructing signatures
+                         #categorical_covariate_keys=['Method'] # multiplicative technical effects (platform, 3' vs 5', donor effect)
+                       )
+# create the regression model
+from cell2location.models import RegressionModel
+mod = RegressionModel(adata_ref)
+
+# view anndata_setup as a sanity check
+mod.view_anndata_setup()
+mod.train(max_epochs=250, use_gpu=True,train_size=1)
+mod.plot_history(20)
+# In this section, we export the estimated cell abundance (summary of the posterior distribution).
+adata_ref = mod.export_posterior(
+    adata_ref, sample_kwargs={'num_samples': 1000, 'batch_size': 2500, 'use_gpu': True}
+)
+
+# Save model
+mod.save("./reference_signatures/", overwrite=True)
+
+# Save anndata object with results
+adata_ref = mod.export_posterior(
+    adata_ref, use_quantiles=True,
+    # choose quantiles
+    add_to_obsm=["q05","q50", "q95", "q0001"],
+    sample_kwargs={'batch_size': 2500, 'use_gpu': True}
+)
+#模型和输出的h5ad，可以像这样加载:
+adata_ref = sc.read_h5ad("./sc_cell2location.h5ad")
+mod = cell2location.models.RegressionModel.load("./reference_signatures/", adata_ref)
+# export estimated expression in each cluster
+if 'means_per_cluster_mu_fg' in adata_ref.varm.keys():
+    inf_aver = adata_ref.varm['means_per_cluster_mu_fg'][[f'means_per_cluster_mu_fg_{i}'
+                                    for i in adata_ref.uns['mod']['factor_names']]].copy()
+else:
+    inf_aver = adata_ref.var[[f'means_per_cluster_mu_fg_{i}'
+                                    for i in adata_ref.uns['mod']['factor_names']]].copy()
+inf_aver.columns = adata_ref.uns['mod']['factor_names']
+inf_aver.iloc[0:5, 0:15]
+# find shared genes and subset both anndata and reference signatures
+intersect = np.intersect1d(adata_st.var_names, inf_aver.index)
+adata_st = adata_st[:, intersect].copy()
+inf_aver = inf_aver.loc[intersect, :].copy()
+
+# prepare anndata for cell2location model
+cell2location.models.Cell2location.setup_anndata(adata=adata_st, batch_key="orig.ident")
+# create and train the model
+mod = cell2location.models.Cell2location(
+    adata_st, cell_state_df=inf_aver,
+    # the expected average cell abundance: tissue-dependent
+    # hyper-prior which can be estimated from paired histology:
+    N_cells_per_location=30,
+    # hyperparameter controlling normalisation of
+    # within-experiment variation in RNA detection:
+    detection_alpha=20
+)
+mod.view_anndata_setup()
+mod.train(max_epochs=30000,
+          # train using full data (batch_size=None)
+          batch_size=None,
+          # use all data points in training because
+          # we need to estimate cell abundance at all locations
+          train_size=1,
+          use_gpu=True,
+         )
+
+# plot ELBO loss history during training, removing first 100 epochs from the plot
+mod.plot_history(1000)
+plt.legend(labels=['full data training']);
+# In this section, we export the estimated cell abundance (summary of the posterior distribution).
+adata_st = mod.export_posterior(
+    adata_st, sample_kwargs={'num_samples': 1000, 'batch_size': mod.adata.n_obs, 'use_gpu': True}
+)
+
+# Save model
+mod.save("./cell2location_map/", overwrite=True)
+
+# Save anndata object with results
+adata_st.write("./cell2location_map/st_cell2location_res.h5ad")
+adata_st = sc.read_h5ad("./cell2location_map/st_cell2location_res.h5ad")
+mod = cell2location.models.Cell2location.load("./cell2location_map/", adata_st)
+mod.plot_QC()
+#fig = mod.plot_spatial_QC_across_batches()
+adata_st.obsm
+#AxisArrays with keys: spatial, MT, means_cell_abundance_w_sf, stds_cell_abundance_w_sf, q05_cell_abundance_w_sf, q95_cell_abundance_w_sf
+pd.DataFrame(adata_st.obsm['q05_cell_abundance_w_sf']).to_csv("./cell2location_map/st_cell2location_res.csv")
+# add 5% quantile, representing confident cell abundance, 'at least this amount is present',
+# to adata.obs with nice names for plotting
+adata_vis.obs[adata_vis.uns['mod']['factor_names']] = adata_vis.obsm['q05_cell_abundance_w_sf']
+adata_st.obsm['q05_cell_abundance_w_sf']
+# select one slide
+from cell2location.utils import select_slide
+#slide = select_slide(adata_vis, 'V1_Human_Lymph_Node')
+
+# plot in spatial coordinates
+with mpl.rc_context({'axes.facecolor':  'black',
+                     'figure.figsize': [4.5, 5]}):
+
+    sc.pl.spatial(adata_st, cmap='magma',
+                  # show first 8 cell types
+                  color=['L6 CT', 'L5 IT', 'L6b', 'L2/3 IT', 'L4', 'Astro'],
+                  ncols=4, size=1.3,
+                  img_key='lowres',
+                  # limit color scale at 99.2% quantile of cell abundance
+                  vmin=0, vmax='p99.2'
+                 )
+# Now we use cell2location plotter that allows showing multiple cell types in one panel
+from cell2location.plt import plot_spatial
+
+# select up to 6 clusters
+clust_labels = ['L6 CT', 'L5 IT', 'L6b']
+clust_col = ['' + str(i) for i in clust_labels] # in case column names differ from labels
+
+#slide = select_slide(adata_st, 'V1_Human_Lymph_Node')
+
+with mpl.rc_context({'figure.figsize': (10, 10)}):
+    fig = plot_spatial(
+        adata=adata_st,
+        # labels to show on a plot
+        color=clust_col, labels=clust_labels,
+        show_img=True,
+        img_key='lowres',
+        # 'fast' (white background) or 'dark_background'
+        style='fast',
+        # limit color scale at 99.2% quantile of cell abundance
+        max_color_quantile=0.992,
+        # size of locations (adjust depending on figure size)
+        circle_diameter=6,
+        colorbar_position='right'
+    )
+# Now we use cell2location plotter that allows showing multiple cell types in one panel
+from cell2location.plt import plot_spatial
+
+# select up to 6 clusters
+clust_labels = ['L6 CT', 'L5 IT', 'L6b']
+clust_col = ['' + str(i) for i in clust_labels] # in case column names differ from labels
+
+#slide = select_slide(adata_st, 'V1_Human_Lymph_Node')
+
+with mpl.rc_context({'figure.figsize': (10, 10)}):
+    fig = plot_spatial(
+        adata=adata_st,
+        # labels to show on a plot
+        color=clust_col, labels=clust_labels,
+        show_img=False,
+        img_key='lowres',
+        # 'fast' (white background) or 'dark_background'
+        style='fast',
+        # limit color scale at 99.2% quantile of cell abundance
+        max_color_quantile=0.992,
+        # size of locations (adjust depending on figure size)
+        circle_diameter=6,
+        colorbar_position='right'
+    )
+# compute UMAP using KNN graph based on the cell2location output
+sc.tl.umap(adata_st, min_dist = 0.3, spread = 1)
+
+# show regions in UMAP coordinates
+with mpl.rc_context({'axes.facecolor':  'white',
+                     'figure.figsize': [5, 5]}):
+    sc.pl.umap(adata_st, color=['seurat_clusters','region_cluster'], size=30,
+               color_map = 'RdPu', ncols = 2, legend_loc='on data',
+               legend_fontsize=20)
+# plot in spatial coordinates
+with mpl.rc_context({'axes.facecolor':  'black',
+                     'figure.figsize': [4.5, 5]}):
+    sc.pl.spatial(adata_st, color=['seurat_clusters','region_cluster'],
+                  size=1.3, img_key='lowres', alpha=0.5)
+from cell2location import run_colocation
+res_dict, adata_st = run_colocation(
+    adata_st,
+    model_name='CoLocatedGroupsSklearnNMF',
+    train_args={
+      'n_fact': np.arange(11, 13), # IMPORTANT: use a wider range of the number of factors (5-30)
+      'sample_name_col': 'orig.ident', # columns in adata_vis.obs that identifies sample
+      'n_restarts': 3 # number of training restarts
+    },
+    # the hyperparameters of NMF can be also adjusted:
+    model_kwargs={'alpha': 0.01, 'init': 'random', "nmf_kwd_args": {"tol": 0.000001}},
+    export_args={'path': './CoLocatedComb/'}
+)
+# Here we plot the NMF weights (Same as saved to `cell_type_fractions_heatmap`)
+res_dict['n_fact12']['mod'].plot_cell_type_loadings()
+mod.samples = adata_st.uns['mod']
+# Compute expected expression per cell type
+expected_dict = mod.module.model.compute_expected_per_cell_type(
+    mod.samples["post_sample_q05"], mod.adata_manager
+)
+
+# Add to anndata layers
+for i, n in enumerate(mod.factor_names_):
+    adata_st.layers[n] = expected_dict['mu'][i]
+
+# Save anndata object with results
+#adata_st.write("./sp.h5ad")
+# Compute expected expression per cell type
+expected_dict = mod.module.model.compute_expected_per_cell_type(
+    mod.samples["post_sample_q05"], mod.adata_manager
+)
+
+# Add to anndata layers
+for i, n in enumerate(mod.factor_names_):
+    adata_st.layers[n] = expected_dict['mu'][i]
+
+# Save anndata object with results
+#adata_st.write("./sp.h5ad")
+def plot_genes_per_cell_type(slide, genes, ctypes):
+    slide.var['SYMBOL'] = slide.var.index
+    n_genes = len(genes)
+    n_ctypes = len(ctypes)
+    fig, axs = plt.subplots(
+        nrows=n_genes, ncols=n_ctypes + 1, figsize=(4.5 * (n_ctypes + 1) + 2, 5 * n_genes + 1), squeeze=False
+    )
+    # axs = axs.reshape((n_genes, n_ctypes+1))
+
+    # plots of every gene
+    for j in range(n_genes):
+        # limit color scale at 99.2% quantile of gene expression (computed across cell types)
+        quantile_across_ct = np.array(
+            [
+                np.quantile(slide.layers[n][:, slide.var["SYMBOL"] == genes[j]].toarray(), 0.992)
+                for n in slide.uns["mod"]["factor_names"]
+            ]
+        )
+        quantile_across_ct = np.partition(quantile_across_ct.flatten(), -2)[-2]
+        sc.pl.spatial(
+            slide,
+            cmap="magma",
+            color=genes[j],
+            # layer=ctypes[i],
+            #gene_symbols="SYMBOL",
+            ncols=4,
+            size=1.3,
+            #img_key="hires",
+            # limit color scale at 99.2% quantile of gene expression
+            vmin=0,
+            vmax="p99.2",
+            ax=axs[j, 0],
+            show=False,
+        )
+
+        # plots of every cell type
+        for i in range(n_ctypes):
+            sc.pl.spatial(
+                slide,
+                cmap="magma",
+                color=genes[j],
+                layer=ctypes[i],
+                gene_symbols="SYMBOL",
+                ncols=4,
+                size=1.3,
+                #img_key="hires",
+                # limit color scale at 99.2% quantile of gene expression
+                vmin=0,
+                vmax=quantile_across_ct,
+                ax=axs[j, i + 1],
+                show=False,
+            )
+            axs[j, i + 1].set_title(f"{genes[j]} {ctypes[i]}")
+
+    return fig, axs
+# list cell types and genes for plotting
+ctypes = ['L6 CT', 'L5 IT', 'L6b']
+genes = ["Hpca", "Plp1"]
+
+with mpl.rc_context({'axes.facecolor':  'black'}):
+    # select one slide
+    # slide = select_slide(adata_vis, 'V1_Human_Lymph_Node')
+    plot_genes_per_cell_type(adata_st, genes,ctypes);
