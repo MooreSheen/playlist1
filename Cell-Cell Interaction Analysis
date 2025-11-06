@@ -1,0 +1,158 @@
+import stlearn as st
+import pandas as pd
+import pathlib as pathlib
+import matplotlib.pyplot as plt
+import numpy as np
+import random as random
+import os as os
+
+st.settings.set_figure_params(dpi=120)
+
+# Make sure all the seeds are set
+seed = 0
+np.random.seed(seed)
+random.seed(seed)
+os.environ['PYTHONHASHSEED'] = str(seed)
+
+# Ignore all warnings
+import warnings
+warnings.filterwarnings("ignore")
+# Setup download directory and get data
+st.settings.datasetdir =  pathlib.Path.cwd().parent / "data"
+sample_id = "V1_Breast_Cancer_Block_A_Section_1"
+block1 = st.datasets.visium_sge(sample_id=sample_id)
+block1 = st.convert_scanpy(block1)
+# Basic normalisation #
+st.pp.filter_genes(block1, min_cells=3)
+st.pp.normalize_total(block1) # NOTE: no log1p
+# Adding the label transfer results
+project_root = pathlib.Path.cwd().parent
+annotation_path = project_root / "annotations"
+cell_types = annotation_path / f"{sample_id}_cell_type_proportions.csv"
+spot_mixtures = pd.read_csv(cell_types, index_col=0)
+spot_mixtures
+aligned_spot_mixtures = spot_mixtures.reindex(block1.obs_names, fill_value=0)
+aligned_spot_mixtures
+labels = aligned_spot_mixtures.idxmax(axis=1)
+labels.name = "cell_type"
+labels
+# NOTE: using the same key in data.obs & data.uns
+block1.obs['cell_type'] = labels # Adding the dominant cell type labels per spot
+block1.obs['cell_type'] = block1.obs['cell_type'].astype('category')
+block1.uns['cell_type'] = aligned_spot_mixtures # Adding the cell type scores
+
+st.pl.cluster_plot(block1, use_label='cell_type')
+lrs = st.tl.cci.load_lrs(['connectomeDB2020_lit'], species='human')
+lrs
+# Running the analysis #
+st.tl.cci.run(block1, lrs,
+                  min_spots=20,  # Filter out any LR pairs with no scores for less than min_spots
+                  distance=None, # None defaults to spot+immediate neighbours; distance=0 for within-spot mode
+                  n_pairs=100,   # Number of random pairs to generate; low as example, recommend ~10,000
+                  n_cpus=None,   # Number of CPUs for parallel. If None, detects & use all available.
+                  )
+lr_info = block1.uns['lr_summary'] # A dataframe detailing the LR pairs ranked by number of significant spots.
+lr_info
+st.tl.cci.adj_pvals(block1, correct_axis='spot', pval_adj_cutoff=0.05, adj_method='fdr_bh')
+# Showing the rankings of the LR from a global and local perspective.
+# Ranking based on number of significant hotspots.
+st.pl.lr_summary(block1, n_top=500)
+st.pl.lr_summary(block1, n_top=50, figsize=(10,3))
+st.pl.lr_diagnostics(block1, figsize=(10,2.5))
+st.pl.lr_n_spots(block1, n_top=50, figsize=(11, 3),
+                    max_text=100)
+st.pl.lr_n_spots(block1, n_top=500, figsize=(11, 3),
+                    max_text=100)
+## Running the GO enrichment analysis ##
+# r_path = "/Library/Frameworks/R.framework/Resources"
+# st.tl.cci.run_lr_go(block1, r_path)
+# st.pl.lr_go(block1, lr_text_fp={'weight': 'bold', 'size': 10}, rot=15,
+#                figsize=(12,3.65), n_top=15, show=False)
+best_lr = block1.uns['lr_summary'].index.values[0] # Just choosing one of the top from lr_summary
+stats = ['lr_scores', 'p_vals', 'p_adjs', '-log10(p_adjs)']
+fig, axes = plt.subplots(ncols=len(stats), figsize=(16,6))
+for i, stat in enumerate(stats):
+    st.pl.lr_result_plot(block1, use_result=stat, use_lr=best_lr, show_color_bar=False, ax=axes[i])
+    axes[i].set_title(f'{best_lr} {stat}')
+fig, axes = plt.subplots(ncols=2, figsize=(8,6))
+st.pl.lr_result_plot(block1, use_result='-log10(p_adjs)', use_lr=best_lr, show_color_bar=False, ax=axes[0])
+st.pl.lr_result_plot(block1, use_result='lr_sig_scores', use_lr=best_lr, show_color_bar=False, ax=axes[1])
+axes[0].set_title(f'{best_lr} -log10(p_adjs)')
+axes[1].set_title(f'{best_lr} lr_sig_scores')
+st.pl.lr_plot(block1, best_lr, inner_size_prop=0.1, outer_mode='binary', pt_scale=5,
+              use_label=None, show_image=True,
+              sig_spots=False)
+st.pl.lr_plot(block1, best_lr, outer_size_prop=1, outer_mode='binary', pt_scale=20,
+              use_label=None, show_image=True,
+              sig_spots=True)
+# All spots #
+st.pl.lr_plot(block1, best_lr,
+              inner_size_prop=0.04, middle_size_prop=.07, outer_size_prop=.4,
+              outer_mode='continuous', pt_scale=60,
+              use_label=None, show_image=True,
+              sig_spots=False)
+# Only significant spots #
+st.pl.lr_plot(block1, best_lr,
+              inner_size_prop=0.04, middle_size_prop=.07, outer_size_prop=.4,
+              outer_mode='continuous', pt_scale=60,
+              use_label=None, show_image=True,
+              sig_spots=True)
+st.pl.lr_plot(block1, best_lr,
+              inner_size_prop=0.08, middle_size_prop=.3, outer_size_prop=.5,
+              outer_mode='binary', pt_scale=50,
+              show_image=True, arrow_width=10, arrow_head_width=10,
+              sig_spots=True, show_arrows=True)
+st.pl.lr_plot(block1, best_lr,
+              inner_size_prop=0.08, middle_size_prop=.3, outer_size_prop=.5,
+              outer_mode='binary', pt_scale=150,
+              use_label='cell_type', show_image=True,
+              sig_spots=True)
+# Running the counting of co-occurence of cell types and LR expression hotspots #
+st.tl.cci.run_cci(block1, 'cell_type',  # Spot cell information either in data.obs or data.uns
+                  min_spots=3,          # Minimum number of spots for LR to be tested.
+                  spot_mixtures=True,   # If True will use the label transfer scores,
+                                        # so spots can have multiple cell types if score>cell_prop_cutoff
+                  cell_prop_cutoff=0.2, # Spot considered to have cell type if score>0.2
+                  sig_spots=True,       # Only consider neighbourhoods of spots which had significant LR scores.
+                  n_perms=50            # Permutations of cell information to get background, recommend at least ~1000
+                 )
+st.pl.cci_check(block1, 'cell_type')
+# Visualising the no. of interactions between cell types across all LR pairs #
+pos_1 = st.pl.ccinet_plot(block1, 'cell_type', return_pos=True)
+
+# Just examining the cell type interactions between selected pairs #
+lrs = block1.uns['lr_summary'].index.values[0:3]
+for best_lr in lrs[0:3]:
+    st.pl.ccinet_plot(block1, 'cell_type', best_lr, min_counts=2,
+                         figsize=(10,7.5), pos=pos_1,
+                      )
+st.pl.lr_chord_plot(block1, 'cell_type')
+
+for lr in lrs:
+    st.pl.lr_chord_plot(block1, 'cell_type', lr)
+# This will automatically select the top interacting CCIs and their respective LRs #
+st.pl.lr_cci_map(block1, 'cell_type', lrs=None, min_total=100, figsize=(20,4))
+# You can also put in your own LR pairs of interest #
+st.pl.lr_cci_map(block1, 'cell_type', lrs=lrs, min_total=100, figsize=(20,4))
+st.pl.cci_map(block1, 'cell_type')
+
+lrs = block1.uns['lr_summary'].index.values[0:3]
+for lr in lrs[0:3]:
+    st.pl.cci_map(block1, 'cell_type', lr)
+best_lr = lrs[0]
+
+### This will plot with simple black arrows ####
+st.pl.lr_plot(block1, best_lr, outer_size_prop=1, outer_mode=None,
+              pt_scale=40, use_label='cell_type', show_arrows=True,
+              show_image=True, sig_spots=False, sig_cci=True,
+                 arrow_head_width=4,
+                 arrow_width=1, cell_alpha=.8
+                 )
+
+### This will colour the spot by the mean LR expression in the spots connected by arrow
+st.pl.lr_plot(block1, best_lr, outer_size_prop=1, outer_mode=None,
+              pt_scale=10, use_label='cell_type', show_arrows=True,
+              show_image=True, sig_spots=False, sig_cci=True,
+                 arrow_head_width=4, arrow_width=2,
+                 arrow_cmap='YlOrRd', arrow_vmax=1.5,
+                 )
