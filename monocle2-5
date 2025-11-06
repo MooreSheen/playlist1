@@ -1,0 +1,145 @@
+#加载包
+library(Seurat)
+library(tidyverse)
+library(monocle)
+#读入seurat数据
+PRO<-readRDS('/vip_training/ceshi/litao/mococle/PRO1.rds')
+DimPlot(PRO,label = TRUE,repel = TRUE)
+head(PRO@meta.data)
+table(PRO@meta.data$orig.ident)
+Idents(PRO)<-'orig.ident'
+PRO<-subset(PRO,idents ='Bong_marrow1')
+Idents(PRO)<-'cluster'
+DimPlot(PRO,label = TRUE,repel = TRUE)
+table(PRO@meta.data$cluster)
+PRO<-subset(PRO,idents =c('Monocytes','GMP','pDCs','ProEryth','HSCs','cDCs','Erythroblasts'))
+DimPlot(PRO,label = TRUE,repel = TRUE)
+saveRDS(PRO,'monocol_pre.rds')
+#PRO<-readRDS('monocol_pre.rds')
+# 提取数据
+expr_matrix <- as(as.matrix(PRO@assays$RNA@counts), 'sparseMatrix') #提取表达矩阵
+pd <- new('AnnotatedDataFrame', data = PRO@meta.data )  #将样本的表型数据转换成AnnotatedDataFrame对象
+fd <- new('AnnotatedDataFrame', data = data.frame(gene_short_name = row.names(PRO),row.names = row.names(PRO))) #提取基因信息转换成AnnotatedDataFrame对象
+head(pd)
+head(fd)
+# 创建对象
+#输入表达矩阵。
+cds <- newCellDataSet(expr_matrix,
+                      phenoData = pd,
+                      featureData = fd,
+                      lowerDetectionLimit = 0.5,
+                      expressionFamily = negbinomial.size()) #单细胞的稀疏矩阵用negbinomial.size()
+head(pData(cds))
+head(fData(cds))
+#数据处理，有点像单细胞的normalized和scaledata
+cds <- estimateSizeFactors(cds) #Size Factor标准化细胞之间的mRNA的差异
+cds <- estimateDispersions(cds) #离散度值可以帮助我们进行后续的差异分析，这步的时间和电脑配置密切相关,如果电脑内存不够可能会报错
+#过滤
+cds <- detectGenes(cds, min_expr = 0.1)  #这一操作会在fData(cds)和pData(cds)中进行基因和细胞的统计信息，至少要在10%的细胞中表达，这个参数可以自己设置
+head(fData(cds))  #head(cds@featureData@data)
+head(pData(cds))
+#然后如有需要可以对细胞和基因做进一步筛选，由于构建cds的文件来自seurat,已经做过过滤，此步可以省略。
+#如下示例：
+#expressed_genes <- row.names(subset(fData(HSMM),num_cells_expressed >= 10))
+#length(expressed_genes)  #查看剩余多少基因
+#HSMM <- HSMM[expressed_genes,]
+#valid_cells <- row.names(subset(pData(HSMM),num_genes_expressed >= 200))
+#length(valid_cells) #查看剩余多少细胞
+#HSMM <- HSMM[,valid_cells]
+#这里使用monocle选择的高变特征基因
+disp_table <- dispersionTable(cds) #选择高变基因
+head(disp_table)
+disp.genes <- subset(disp_table, mean_expression >= 0.1 ) # 可根据实验自行调节；这里挑表达量不太低的。
+#disp.genes <- subset(disp_table, mean_expression >= 0.1 & dispersion_empirical >= 1 * dispersion_fit) #可以根据表达量和离散度选择
+length(disp.genes$gene_id)
+cds <- setOrderingFilter(cds, disp.genes$gene_id)  #将选择的基因添加到cds中，以便用于对后续的连续细胞群进行分群，这里的基因群可以用其他方法获取的基因信息
+plot_ordering_genes(cds)
+cds <- reduceDimension(cds, max_components = 2,method = 'DDRTree')  #monocle2一共有三种方法降维聚类，拟时序分析使用DDRTree
+cds <- orderCells(cds) #对细胞按轨迹进行排序，很长时间
+#saveRDS(cds,'cds.rds')
+#cds<-readRDS('cds.rds')
+#saveRDS(cds,'cds.rds')
+cds<-readRDS('cds.rds')
+disp.genes <- subset(disp_table, mean_expression >= 0.1 )
+head(pData(cds))
+#pdf("train.monocle.pseudotime.pdf",width = 7,height = 7)
+plot_cell_trajectory(cds,color_by="Pseudotime", size=1,show_backbone=TRUE) #画拟时序的图，按照时序进行排序
+#dev.off()
+plot_cell_trajectory(cds,color_by="State") 
+plot_cell_trajectory(cds,color_by="cluster")
+plot_cell_trajectory(cds, color_by = " State ") + facet_wrap("~ State ", nrow = 1) #不同的state分开展示
+#p<-plot_cell_trajectory(cds, color_by = " State ") + facet_wrap("~ State ", nrow = 1) 
+#print(p)
+#ggsave("trajectory_1plot.pdf", plot = p, width = 16, height = 12)
+plot_complex_cell_trajectory(cds, x = 1, y = 2,color_by = "cluster") #进化树图
+#ggplot(pData(cds), aes(Pseudotime, colour = seurat_clusters, fill=seurat_clusters)) + geom_density(bw=0.5,size=1,alpha = 0.5)+theme_classic()
+ggplot(pData(cds), aes(Pseudotime,colour = cluster,fill=cluster))+geom_density(bw=0.5,size=1,alpha = 0.5) #密度图
+#差异基因分析
+head(disp.genes) #我们之前选择的高变基因
+#基于降维使用的基因，看这些基因是否与拟时序相关（p值），该步运行时间会比较长
+genes <- disp.genes$gene_id
+pseudotime_de <- differentialGeneTest(cds[genes,],cores = 1, fullModelFormulaStr = "~sm.ns(Pseudotime)") #求拟时序上基因的差异显著性,时间会比较长
+dim(pseudotime_de)
+head(pseudotime_de)
+write.csv(pseudotime_de,'pseudotime_diff.csv')
+#pseudotime_de<-read.csv('pseudotime_diff.csv',header = TRUE, row.name=1) #下次用可以直接读取
+#head(pseudotime_de)
+#筛选显著差异的基因做热图 
+pseudotime_de_gene <- row.names(subset(pseudotime_de, qval < 1e-2) )#取q值小于0.01的基因 
+#pseudotime_de_gene <- top_n(pseudotime_de，n = 100, desc(qval)) #选择top100
+P<-plot_pseudotime_heatmap(cds[pseudotime_de_gene,],return_heatmap=T, show_rownames = F) #如果需要行名则rownames=True
+?cutree
+#提取保存聚类热图中cluster上的基因
+clusters <- cutree(P$tree_row,k=6)
+clustering <- data.frame(clusters)
+head(clustering)
+dim(clustering)
+clustering[,1] <- as.character(clustering[,1])
+colnames(clustering) <- "Gene_Clusters"
+#write.csv(clustering, "pseudotime_heatmap_clustergene.csv", row.names = T)
+#table(clustering)
+#显著差异基因按照热图结果排序并保存
+hp.genes <- P$tree_row$labels[P$tree_row$order]
+head(hp.genes)
+pseudotime_diff_sig <- pseudotime_de[hp.genes,c("gene_short_name","pval", "qval")]
+#write.csv(pseudotime_diff_sig, "pseudotime_diff_sig.csv", row.names = T)
+head(pseudotime_diff_sig)
+#将细胞聚类的分群结果添加到表里面
+clustering$gene_short_name <- rownames(clustering)
+head(clustering)
+pseudotime_diff_sig2 <- inner_join(pseudotime_diff_sig,clustering,by ='gene_short_name') #将分群结果添加到表里面
+head(pseudotime_diff_sig2)
+#write.csv(pseudotime_diff_sig2, "pseudotime_diff_sig2.csv", row.names = T)
+plot_cell_trajectory(cds,color_by = "State")
+#绘制分支可变基因
+#genes <- disp.genes$gene_id
+BEAM_res=BEAM(cds[genes,],branch_point = 1, progenitor_method = 'duplicate') #这里的genes就是前面用于降维的基因。提取第1个节点,运行时间会比较长
+head(BEAM_res)
+#根据依赖分支的显著性排序并保存基因列表
+BEAM_res <- BEAM_res[order(BEAM_res$qval),]
+BEAM_res1 <- BEAM_res[,c('gene_short_name','pval','qval')]
+write.csv(BEAM_res1, "BEAM_res.csv", row.names = F)
+#BEAM_res1<-read.csv("BEAM_res.csv",header = TRUE, row.name=1)
+head(BEAM_res1)
+#热图可视化，根据基因数的多少运行时间会有变化
+p <- plot_genes_branched_heatmap(cds[row.names(subset(BEAM_res1,pval < 1e-4)),],
+                            branch_point = 1, #绘制的是哪个分支
+                            num_clusters = 3, #分成几个cluster，根据需要调整
+                            show_rownames = F, 
+                            return_heatmap = T)
+ggsave("branched1_heatmap.pdf", p$ph_res, width = 14, height = 15)
+#查看感兴趣基因在不同的状态或者cluster中的表达情况
+gene <- c('Clk3','St3gal2','Usp4')
+plot_genes_in_pseudotime(cds[gene,],
+                              color_by = "State",#如果想看cluster可以选择cluster
+                              ncol = 1)
+#选择关键基因展示,基因在拟时序曲线上的表达变化
+keygenes <- head(BEAM_res$gene_short_name ,4)
+cds_subset <- cds[keygenes,]
+
+p1 <- plot_genes_in_pseudotime(cds_subset, color_by = "State")
+p2 <- plot_genes_in_pseudotime(cds_subset, color_by = "cluster")
+p3 <- plot_genes_in_pseudotime(cds_subset, color_by = "Pseudotime")
+P<-p1|p2|p3
+P
+ggsave("gene_plot.pdf", plot = P, width = 16, height = 8)
