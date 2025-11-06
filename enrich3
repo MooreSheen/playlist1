@@ -29,4 +29,214 @@ head(pbmc@active.ident)
 head(pbmc@meta.data)
 table(pbmc@meta.data$seurat_annotations) #统计细胞类型及对应的细胞数
 ?FindMarkers
+#只针对2个cluster
+cluster.markers <- FindMarkers(object = pbmc, ident.1 = 'CD14+ Mono',ident.2 = 'FCGR3A+ Mono', logfc.threshold = 0.25) #查找2个cluster的差异基因
+head(cluster.markers)
+deg<-data.frame(gene = rownames(cluster.markers),cluster.markers) #加上gene这一列，内容是差异基因列表（cluster.markers）的行名
+head(cluster.markers)
+head(deg)
+deg1 <- deg #复制数据，保留原始数据备用
+#logFC_t=0.5
+#P.Value_t = 0.05
+k1 = (deg1$p_val_adj < 0.05)&(deg1$avg_log2FC < -0.5) #取下调基因，过滤条件是p_val_adj < 0.05，avg_log2FC < -0.5
+k2 = (deg1$p_val_adj < 0.05)&(deg1$avg_log2FC > 0.5) #取上调基因，过滤条件是p_val_adj < 0.05，avg_log2FC > 0.5
+table(k1)
+table(k2)
+deg1$change <- ifelse(k1,"down",ifelse(k2,"up","stable"))  #将基因上下调状态添加到deg1的表中
+head(deg1)
+table(deg1$change) #可以查看一下上下调基因的数量
+#基因名称SYMBOL转换ENTREZID
+s2e <- bitr(deg1$gene,
+            fromType = "SYMBOL",
+            toType = "ENTREZID",
+            OrgDb = org.Hs.eg.db) #人
+s2e
+deg1 <- inner_join(deg1,s2e,by=c("gene"="SYMBOL"))  #将基因的entrezid信息添加到marker列表中
+head(deg1)
+#GO富集分析差异基因列表[Symbol]
+gene_up = deg1[deg1$change == 'up','gene']  #上调的基因是哪些
+gene_down = deg1[deg1$change == 'down','gene']  #下调的基因是哪些
+gene_diff = c(gene_up,gene_down) #有变化的基因是哪些
+head(gene_up)
+ego <- enrichGO(gene = gene_up, OrgDb = "org.Hs.eg.db", keyType  = 'SYMBOL',ont="all") #进行通路富集分析，在这里我们进行了全部的分析，以up_regulated基因的富集分析为例
+#如果想针对性的看生物过程也可以进行下面的分析
+#生物过程
+#ego_BP <- enrichGO(gene       = gene_up,
+ #               OrgDb         = org.Hs.eg.db,
+ #              keyType       = 'SYMBOL',
+ #              ont           = "BP",
+ #             pAdjustMethod = "BH",
+ #             pvalueCutoff  = 0.01,
+ #             qvalueCutoff  = 0.05)
+
+#分子功能
+#ego_MF <- enrichGO(gene       = gene_up,
+#                OrgDb         = org.Hs.eg.db,
+#                keyType       = 'SYMBOL',
+#                ont           = "MF",
+#                pAdjustMethod = "BH",
+#                pvalueCutoff  = 0.01,
+#                qvalueCutoff  = 0.05)
+#细胞组分
+#ego_CC <- enrichGO(gene          = gene_up,
+#                keyType       = 'SYMBOL', #基因ID的类型
+#                OrgDb         = org.Hs.eg.db,  #包含人注释信息的数据库
+#                ont           = "CC",
+#                pAdjustMethod = "BH", #指定多重假设检验矫正的方法
+#                pvalueCutoff  = 0.01,
+#                qvalueCutoff  = 0.05)
+
+head(data.frame(ego))
+#head(ego@result) #也可以用这个代码查看富集结果
+?dotplot
+dotplot(ego)
+dotplot(ego, showCategory=13,color="pvalue")  #参数showCategory设置显示通路个数，默认前10个
+barplot(ego)
+p <- dotplot(ego, split="ONTOLOGY",label_format=100) +facet_grid(ONTOLOGY~., scale="free")
+p
+ego_CC <- enrichGO(gene          = gene_up,
+                keyType       = 'SYMBOL', #基因ID的类型
+                OrgDb         = org.Hs.eg.db,  #包含人注释信息的数据库
+                ont           = "CC",
+                pAdjustMethod = "BH", #指定多重假设检验矫正的方法
+                pvalueCutoff  = 0.01,
+                qvalueCutoff  = 0.05)
+#两种类型的有向无环图  https://zhuanlan.zhihu.com/p/347602884
+#pdf(file = "GO_BP_plotGO.pdf",width = 8,height = 8)
+plotGOgraph(ego_CC) #The topGO package is required
+#dev.off()
+#KEGG富集分析差异基因列表[ENTREZID],每行代买的含义和上边雷同
+deg1<-data.frame(gene = rownames(cluster.markers),cluster.markers)
+k1 = (deg1$p_val_adj < 0.05)&(deg1$avg_log2FC > 0.5)
+k2 = (deg1$p_val_adj < 0.05)&(deg1$avg_log2FC < -0.5)
+change = ifelse(k1,"up",ifelse(k2,"down","stable"))
+deg1$change <- change
+s2e <- bitr(deg1$gene, 
+            fromType = "SYMBOL",
+            toType = "ENTREZID",
+            OrgDb = org.Hs.eg.db)#人基因转换成ENTREZID
+deg1 <- inner_join(deg1,s2e,by=c("gene"="SYMBOL"))
+gene_all = deg1[,'ENTREZID']
+gene_up_KEGG = deg1[deg1$change == 'up','ENTREZID']
+gene_down_KEGG = deg1[deg1$change == 'down','ENTREZID']
+gene_diff_KEGG = c(gene_up_KEGG,gene_down_KEGG)
+head(deg1)
+# 上调基因富集
+kk.up <- enrichKEGG(gene         = gene_up_KEGG, #注意这里只能用 entrzeid
+                      organism     = 'hsa',#物种 鼠 mmu
+                      universe     = gene_all, #背景基因集，可省
+                      pvalueCutoff = 0.05,  ##指定 p 值阈值，不显著的值将不显示在结果中
+                      qvalueCutoff = 0.05)
+# 下调基因富集
+kk.down <- enrichKEGG(gene         =  gene_down_KEGG,
+                        organism     = 'hsa',
+                        universe     = gene_all,
+                        pvalueCutoff = 0.05,
+                        qvalueCutoff =0.1)
+kk.diff <- enrichKEGG(gene         = gene_diff_KEGG,
+                        organism     = 'hsa',
+                        pvalueCutoff = 0.1)
+save(kk.diff,kk.down,kk.up,file = "kegg.Rdata") #保存数据
+#load('kegg.Rdata')
+head(kk.diff)
+#基因ID转换
+ekegg <- setReadable(kk.diff, OrgDb = org.Hs.eg.db, keyType="ENTREZID") #将基因的gene ID列的entrzeid转换成SYMBOL
+head(ekegg)
+#kegg_diff_dt <- data.frame(ekegg)
+#head(kegg_diff_dt)
+# 富集柱状图和气泡图
+p1 <- barplot(ekegg, showCategory=10,label_format=100)
+p2 <- dotplot(ekegg, showCategory=10,label_format=100)
+plotc = p1/p2
+plotc
+#基因-通路关系网络图
+enrichplot::cnetplot(ekegg,circular=FALSE,colorEdge = TRUE)##circluar为指定是否环化，基因过多时建议设置为FALSE,默认top5通路
+enrichplot::cnetplot(ekegg,circular=TRUE,colorEdge = TRUE)
+#基因-通路相关热图，如果基因太多不合适做热图。
+enrichplot::heatplot(ekegg,showCategory = 5)
+head(deg1)
+#获取基因列表，包含基因和表达差异倍数两列信息
+geneList = deg1$avg_log2FC 
+names(geneList) = deg1$ENTREZID
+geneList = sort(geneList,decreasing = T)
+geneList[1:10]
+## gsea-GO 富集分析
+#gseaGO <- gseGO(
+#    geneList = geneList,
+#    keyType = "ENTREZID",
+#    OrgDb = org.Mm.eg.db,
+#    ont = "ALL",
+#    nPermSimple=1000, #This parameter can be omitted or modified
+#    minGSSize = 10,
+#    maxGSSize = 500,
+#    pvalueCutoff = 0.05,
+#    verbose = FALSE
+#)
+
+
+##  gsea-KEGG富集分析
+kk_gse <- gseKEGG(
+    geneList = geneList,
+    organism = "hsa",
+    keyType = 'kegg',
+    minGSSize = 10,
+    pvalueCutoff = 0.5,
+    verbose = FALSE  #运行时不显示详细信息
+)
+head(kk_gse)
+kk_gse <- DOSE::setReadable(kk_gse, OrgDb='org.Hs.eg.db',keyType='ENTREZID')   #基因ID转换
+sortkk <- kk_gse[order(kk_gse$enrichmentScore, decreasing = T),] #排序，decreasing = T倒序排
+head(sortkk)
+gseaplot2(kk_gse, 
+          "hsa00380", #选择富集通路ID号
+          color = "firebrick")
+gseaplot2(kk_gse, row.names(sortkk)[1:4]) #也可以看一下前4条通路
+#选择自己用到的数据库的数据集
+genesets <- msigdbr(species = "Homo sapiens", category = "C2") %>% dplyr::select("gs_name","gene_symbol" )%>% as.data.frame()
+#https://www.gsea-msigdb.org/gsea/msigdb不同数据集包含的内容，在这里我们选择c2数据集：（专家）校验基因集合，基于通路、文献等;
+#可以使用msigdbr_species() 和 msigdbr_collections()查看支持的物种和基因集类别。
+
+#整理数据，获取基因列表，包含基因和表达差异倍数两列信息
+geneLists = deg1$avg_log2FC 
+names(geneLists) = deg1$gene
+geneLists = sort(geneLists,decreasing = T) #排序
+egmt <- GSEA(geneLists, TERM2GENE=genesets,verbose=F,pvalueCutoff = 0.05) #富集分析
+y=data.frame(egmt) #结果转化
+head(y)
+#经典gseaplot
+gseaplot2(egmt, geneSetID = 1, title = egmt$Description[1])
+#自己选择的数据库的数据集 
+genesets <- msigdbr(species = "Homo sapiens", category = "C2",subcategory = "CP:KEGG") %>% dplyr::select("gs_name","gene_symbol" )%>% as.data.frame() #选择人的KEGG
+head(genesets)
+kegg_list = split(genesets$gene_symbol, genesets$gs_name)
+kegg_list[1:2]
+#使用AverageExpression计算分组平均表达矩阵，作为gsva的输入文件
+#Idents(pbmc) <- 'seurat_clusters' #可以通过修改分组内容对不同的分组形势进行分析
+expr <- AverageExpression(pbmc, assays = "RNA", slot = "data")[[1]]
+expr <- expr[rowSums(expr)>0,]#选取非零基因
+expr <- as.matrix(expr)
+head(expr)
+?gsva
+#富集分析，需要点时间
+gsvaPar <- gsvaParam(expr, kegg_list)
+kegg_gsva <- gsva(gsvaPar, verbose=FALSE) #verbose提供每步的计算信息
+head(kegg_gsva)
+#保存结果
+kegg_gsvas <- data.frame(Genesets=rownames(kegg_gsva), kegg_gsva, check.names = F)
+head(kegg_gsvas)
+write.csv(kegg_gsvas, "kegg_gsva.csv", row.names = F)
+#热图可视化
+p <- pheatmap::pheatmap(kegg_gsva,show_colnames = T,
+                  scale = "row",angle_col = "45",
+                  color = colorRampPalette(c("navy", "white", "firebrick3"))(50))
+pdf("kegg_gsva.pdf",width = 15,height = 25)
+print(p)
+dev.off()
+#筛选感兴趣的展示
+aa <- kegg_gsva[c(1:10),]
+aa
+options(repr.plot.width = 10, repr.plot.height = 6)
+pheatmap::pheatmap(aa,show_colnames = T,
+                  scale = "row",angle_col = "45",
+                  color = colorRampPalette(c("navy", "white", "firebrick3"))(50))
 
