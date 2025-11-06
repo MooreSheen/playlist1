@@ -1,1 +1,136 @@
+#加载分析需要的软件包
+suppressMessages({
+library(Seurat)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(grid)
+library(tidyverse)
+    })
+#数据读入和创建Seurat对象：
+pbmc.data <- Read10X(data.dir ="/vip_training/311/qijia/Seurat/pbmc3k_matrix") 
+ pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+ pbmc <- RenameCells(pbmc, add.cell.id = 'pbmc3k')
+#合并多个矩阵数据
+#pbmc1.data <- Read10X(data.dir = "/vip_training/311/qijia/Seurat/pbmc3k_matrix") 
+#pbmc1 <- CreateSeuratObject(counts = pbmc1.data, project = "pbmc3k", min.cells = 3, min.features = 200)
 
+#pbmc2.data <- Read10X(data.dir = "/vip_training/311/qijia/Seurat/pbmc6k_matrix") 
+#pbmc2 <- CreateSeuratObject(counts = pbmc2.data, project = "pbmc6k", min.cells = 3, min.features = 200)
+#pbmc1 <- RenameCells(pbmc1, add.cell.id = "pbmc1") #将细胞标签前面添加上对应的样本名称
+#pbmc2 <- RenameCells(pbmc2, add.cell.id = "pbmc2")
+#merge.data <- merge(pbmc1,pbmc2)
+
+#merge more than two data
+#merge.data <- merge(x = pbmc1, y = list(pbmc2, pbmc3))
+#普通矩阵数据读入和创建Seurat对象：
+#matrix <- read.table("matrix.txt.gz ",row.names=1,header=T,sep="\t") cso <- CreateSeuratObject(counts = matrix, project = "pancreas ", min.cells = 3, min.features = 200)
+#计算线粒体基因含量
+#pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-|^mt-")
+#如何计算核糖体基因含量，小提示：核糖体基因一般“^RPL|^RPS|^MRPL|^MRPS”开头
+pbmc[["percent.rb"]] <- PercentageFeatureSet(pbmc, pattern = "^RPL|^RPS|^MRPL|^MRPS")
+#创建Seurat object & QC  
+VlnPlot(object = pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+ pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+VlnPlot(object = pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+#数据标准化
+pbmc <- NormalizeData(object = pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
+#特征选择：寻找高变基因
+pbmc <- FindVariableFeatures(object = pbmc,selection.method = "vst", nfeatures = 2000)
+ top10 <- VariableFeatures(pbmc)[1:10]
+ plot1 <- VariableFeaturePlot(pbmc)
+ plot2 <- LabelPoints(plot = plot1, points = top10,repel = T)
+ CombinePlots(plots = list(plot1, plot2))
+plot2
+# 数据归一化
+all.gene <- rownames(pbmc)
+ pbmc <- ScaleData(pbmc,features = all.gene)
+#去除线粒体基因对细胞分群的影响
+#pbmc <- ScaleData(pbmc,features = all.gene, vars.to.regress = "percent.mt" )
+#数据降维
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+ ElbowPlot(pbmc)
+#聚类分群
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+ pbmc <- FindClusters(pbmc, resolution = 0.5)
+ pbmc <- RunUMAP(pbmc, dims = 1:10)
+ DimPlot(pbmc, reduction = "umap")
+ pbmc <- RunTSNE(pbmc,dims = 1:10)
+ DimPlot(pbmc, reduction = "tsne")
+ saveRDS(pbmc, file = "pbmc.rds")
+# 寻找cluster1的marker gene
+ clusters1.markers <- FindMarkers(pbmc, ident.1=1, logfc.threshold= 0.25,min.pct = 0.25)
+# 寻找所有细胞类型的marker gene
+ pbmc.markers <- FindAllMarkers(object = pbmc, logfc.threshold= 0.25,min.pct = 0.25)
+#寻找差异基因，并且可视化 
+# featureplot and vlnplot
+ VlnPlot(object = pbmc, features = c("MS4A1", "CD79A")) 
+ FeaturePlot(object = pbmc,features = c("MS4A1", "CD79A", "CD3D", "CD4"))
+#寻找差异基因，并且可视化
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+#寻找差异基因，并且可视化
+top10 <- pbmc.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+#热图
+DoHeatmap(object = pbmc, features=top10$gene)
+#保存cluster差异基因表
+#保存每个cluster的特异基因
+subc<-levels(x= pbmc@active.ident)
+for (l in subc){
+   cluster.markers <- FindMarkers(object= pbmc , ident.1=l,min.pct=0.1,logfc.threshold = 0.25)
+   write.table(cluster.markers,file=paste(l,'_diffgenes.xls',sep=''),sep='\t',quote=F,row.names=T)}
+dev.off()
+#给细胞亚群添加文字标注
+new.cluster.ids <-c("Naive_CD4_T", "Memory_CD4_T", "CD14+_Mono", "B", "CD8_T", "FCGR3A+_Mono", "NK", "DC", "Platelet")
+ names(new.cluster.ids) <- levels(pbmc)
+ pbmc <- RenameIdents(pbmc, new.cluster.ids)
+ pbmc[["celltype"]] <- Idents(object = pbmc)
+ DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5)
+head(pbmc@meta.data)
+#保存RDS文件
+ saveRDS(pbmc, file ='pbmc.diff_PRO.rds')
+#保存细胞数和细胞比例
+ cluster_num <- table(pbmc@active.ident, pbmc@meta.data[,"orig.ident"]) 
+ write.table(cluster_num,file='pbmc.CellsNumberPerCluster.xls', sep='\t',quote=F,row.names=T)
+ freq_table <- prop.table(x=table(pbmc@active.ident, pbmc@meta.data[,"orig.ident"]),margin=2)
+ write.table(freq_table,file='pbmc.CellsPerCluster.xls',sep='\t',quote=F,row.names=T)
+head(pbmc@meta.data)
+pbmc <- RenameIdents(object = pbmc, "NK" = "NK_2")
+ DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+#修改细胞标签名字 
+ pbmc <- RenameIdents(object = pbmc, "CD8 T" = "CD8 Teff")
+ DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+#筛选特定细胞类型
+#select cell types  同样的方法，还可以用于从多样本对象中筛选样本
+ pbmc_sub <- subset(pbmc,idents = c("B","NK_2"))
+ DimPlot(pbmc_sub, reduction = "umap",label = T)
+pbmc_sub <- subset(pbmc, idents = c("B","NK_2"), invert = T)
+ DimPlot(pbmc_sub, reduction = "umap", label = T)
+#筛选特定基因
+ pbmc_sub1 <-subset(x = pbmc, subset = MS4A1>1)
+ DimPlot(pbmc_sub1,reduction = "umap",label = T)
+#改变分辨率 
+##change resolution from 0.5 to 1.5
+ pbmc$res0.5 <- Idents(object = pbmc)
+ pbmc <- FindClusters(pbmc, resolution = 1.5)
+ pbmc <- RunUMAP(pbmc, dims = 1:10)
+ a <- DimPlot(pbmc, reduction="umap",group.by='RNA_snn_res.1.5')
+ b <- DimPlot(pbmc, reduction="umap",group.by='RNA_snn_res.0.5')
+ CombinePlots(plots = list(a,b))
+pbmc<- readRDS("./pbmc.diff_PRO.rds")
+DimPlot(object = pbmc, reduction = "umap",label=FALSE)
+#降维可视化：DimPlot
+#  Dimensional reduction plot for PCA or tSNE or UMAP
+ a <- DimPlot(pbmc, reduction = "tsne")
+ b <- DimPlot(pbmc, reduction = "pca")
+ c <- DimPlot(pbmc, reduction = "umap")
+ #CombinePlots(plots = list(a,b,c), ncol=3)
+a  #tsne
+b #pca
+c  #umap
+##  diffgene 山脊图
+RidgePlot(object = pbmc, feature = c("LYZ", "CCL5", "IL32"),ncol = 1)
+#点图
+# diffgene dotplot
+ DotPlot(object = pbmc, feature = c("CD3D","CD4","CD79A","LYZ", "CCL5", "IL32"))
