@@ -1,0 +1,246 @@
+library(Seurat)
+PRO<-readRDS('/data/singlecell/pbmc3k_human/pbmc3k.final.rds')
+write.csv(t(as.matrix(PRO@assays$RNA@counts)), file = "pbmc_3k.all.csv")  # 注意矩阵一定要转置，不然会报错
+# 导入所需的模块
+import os, sys # 用于文件路径和系统操作
+os.getcwd() # 获取当前工作目录（即当前脚本所在的文件夹路径）
+os.listdir(os.getcwd()) # 列出当前工作目录下的所有文件和文件夹
+# 导入 loompy、numpy 和 scanpy 库
+import loompy as lp; # 用于创建和操作 Loom 格式文件
+import numpy as np; # 用于数学计算和数组操作
+import scanpy as sc # 用于处理单细胞数据
+# 使用 scanpy 库读取 CSV 文件（pbmc_3k.all.csv）并加载到 AnnData 对象中
+x=sc.read_csv("pbmc_3k.all.csv");
+# 创建行属性字典，包含基因名称（var_names）
+row_attrs = {"Gene": np.array(x.var_names),};
+# 创建列属性字典，包含细胞ID（obs_names）
+col_attrs = {"CellID": np.array(x.obs_names)};
+# 将 AnnData 对象的数据转置后保存为 Loom 格式文件（pbmc_3k.loom）
+# X 是包含数据矩阵的属性，转置是因为 Loom 格式要求行表示基因，列表示细胞
+lp.create("pbmc_3k.loom",x.X.transpose(),row_attrs,col_attrs);
+# 人：/data/SCENIC/human_folder
+# 小鼠：/data/SCENIC/mouse_database
+# 不同物种的数据库不一样，这里是人类是human 
+dir=/SGRNJ06/yangjing/SCENIC/folder #改成自己的目录
+tfs=$dir/allTFs_hg38.txt
+feather=$dir/hg38__refseq-r80__10kb_up_and_down_tss.mc9nr.genes_vs_motifs.rankings.feather
+tbl=$dir/motifs-v9-nr.hgnc-m0.001-o0.0.tbl
+# 一定要保证上面的数据库文件完整无误
+input_loom=pbmc_3k.loom
+ls $tfs  $feather  $tbl  
+
+# pyscenic 的3个步骤之 grn
+## 构建转录因子与基因的调控网络
+pyscenic grn \
+--num_workers 20 \
+--output adj.sample.tsv \
+--method grnboost2 \
+$input_loom  \
+$tfs 
+
+# pyscenic 的3个步骤之 cistarget 
+## 验证转录因子与基因的调控网络的真实性
+pyscenic ctx \
+adj.sample.tsv $feather \
+--annotations_fname $tbl \
+--expression_mtx_fname $input_loom  \
+--mode "dask_multiprocessing" \
+--output reg.csv \
+--num_workers 20  \
+--mask_dropouts
+
+# pyscenic 的3个步骤之 AUCell
+## 计算AUC曲线筛选调控网络
+pyscenic aucell \
+$input_loom \
+reg.csv \
+--output out_SCENIC.loom \
+--num_workers 20
+
+## 运行完成后会在当前目录下生成3个文件
+## adj.sample.tsv (转录因子-靶基因权重表)，reg.csv(TF-motif-targetgenes对应表)，out_SCENIC.loom (用作下游可视化)
+# 加载所需软件包
+library(Seurat)
+library(SCopeLoomR)
+library(AUCell)
+library(SCENIC)
+library(dplyr)
+library(KernSmooth)
+library(RColorBrewer)
+library(plotly)
+library(BiocParallel)
+library(grid)
+library(ComplexHeatmap)
+library(data.table)
+# 提取 out_SCENIC.loom 信息
+loom <- open_loom('out_SCENIC.loom')
+# 获取regulons（活性单元）
+# 从 Loom 文件中提取 "Regulons" 列属性，得到一个包含 regulons（活性单元）信息的矩阵
+regulons_incidMat <- get_regulons(loom, column.attr.name="Regulons")
+# 显示 regulons_incidMat 矩阵的前 4 行和前 4 列，用于检查数据结构
+regulons_incidMat[1:4,1:4]
+# 将 regulons 的信息从矩阵转化为基因列表
+regulons <- regulonsToGeneLists(regulons_incidMat)
+head(regulons)
+# 获得regulonAUC（活性单元的活性得分）
+# 提取 regulons 的活性得分（AUC），这些值反映了每个细胞中 regulon 的活性水平
+regulonAUC <- get_regulons_AUC(loom,column.attr.name='RegulonsAUC') 
+# 获取 regulon 的阈值（活性得分的分类标准）
+# 提取 regulon 的阈值数据，用于判断活性得分的高低
+regulonAucThresholds <- get_regulon_thresholds(loom)
+regulonAucThresholds
+# 确认活性单元的一致性
+rownames(regulonAUC)  # 显示 regulonAUC 矩阵的行名，这些行名应该对应细胞或样本
+names(regulons) # 显示 regulons 基因列表的名称，这些名称应该对应每个 regulon
+# # 将转录因子分析结果和降维聚类分群结合起来
+sce<- readRDS("/data/singlecell/pbmc3k_human/pbmc3k.final.rds")
+sce <- UpdateSeuratObject(sce)
+# 确定细胞名称顺序是否一致
+sub_regulonAUC <- regulonAUC[,match(colnames(sce),colnames(regulonAUC))]
+# 从 regulonAUC 中提取与 sce 数据集相对应的列（细胞），确保两者的列名顺序一致
+dim(sub_regulonAUC) # 显示 sub_regulonAUC 的维度，检查数据的行列数
+identical(colnames(sub_regulonAUC), colnames(sce)) # 检查 sub_regulonAUC 和 sce 的列名是否完全一致（即细胞的顺序是否一致）
+# 创建一个数据框 cellClusters，其中包含每个细胞对应的机械分群（seurat_clusters），列名为细胞名称（sce 的列名）
+cellClusters <- data.frame(row.names = colnames(sce), 
+                           seurat_clusters = as.character(sce$seurat_clusters))
+# 创建一个数据框 cellTypes，其中包含每个细胞的注释信息（seurat_annotations），列名为细胞名称（sce 的列名
+cellTypes <- data.frame(row.names = colnames(sce), 
+                        celltype = as.character(sce$seurat_annotations))
+head(cellTypes)
+head(cellClusters)
+sub_regulonAUC[1:4,1:4]
+# select resolution
+selectedResolution <- "celltype"  # 设置分析的分辨率，这里选择的是 "celltype"，表示根据细胞类型进行分组
+
+# Split the cells by cluster:
+cellsPerGroup <- split(rownames(cellTypes), 
+                       cellTypes[, selectedResolution])  
+# 根据 "celltype" 列（细胞类型信息）将细胞分成不同的组，结果存储在 cellsPerGroup 中
+# cellsPerGroup 是一个列表，列表中的每个元素包含属于该类别的细胞名称（行名）
+
+# 去除extened regulons
+sub_regulonAUC <- sub_regulonAUC[onlyNonDuplicatedExtended(rownames(sub_regulonAUC)),] 
+# 使用 onlyNonDuplicatedExtended 函数去除 "extended regulons"（可能是冗余的调控单元），
+# 保留没有重复的 regulon（调控因子）对应的 AUC 数据
+
+dim(sub_regulonAUC)  # 检查去除冗余调控单元后的 sub_regulonAUC 数据维度，确认数据处理是否成功
+
+# Calculate average expression:
+regulonActivity_byGroup <- sapply(cellsPerGroup,
+                                  function(cells) 
+                                    rowMeans(getAUC(sub_regulonAUC)[, cells]))
+# 对每个细胞群体（按 celltype 分组）计算每个 regulon 的平均活性（AUC 值）
+# `getAUC(sub_regulonAUC)` 获取 sub_regulonAUC 中的 AUC 数据， 
+# 然后对每个组中的细胞进行行均值计算，得到每个 regulon 在每个群体中的平均活性
+
+# Scale expression:
+regulonActivity_byGroup_Scaled <- t(scale(t(regulonActivity_byGroup),
+                                          center = T, scale = T))
+# 对计算出的每个群体的平均活性进行标准化处理：每个 regulon 在不同群体中的活性值都进行中心化（减去均值）和标准化（除以标准差）
+# 这样处理后，不同群体间的 regulon 活性数据可以在同一尺度上进行比较
+
+# 同一个regulon在不同cluster的scale处理
+dim(regulonActivity_byGroup_Scaled)  # 检查标准化后的 regulon 活性数据维度
+
+# 可视化
+pheatmap(regulonActivity_byGroup_Scaled)  
+# 使用 pheatmap 函数绘制热图，展示不同细胞群体（按 celltype 分组）中的 regulon 活性数据
+# 这样可以直观地看到不同群体间调控因子的活性差异
+# 计算Regulon特异性得分
+# calcRSS函数用于计算每个细胞类型的Regulon特异性得分（RSS），
+# AUC参数传入sub_regulonAUC数据，表示每个细胞类型的AUC值；
+# cellAnnotation参数表示细胞类型注释信息，选定的是selectedResolution。
+rss <- calcRSS(AUC=getAUC(sub_regulonAUC), 
+               cellAnnotation=cellTypes[colnames(sub_regulonAUC), 
+                                           selectedResolution]) 
+
+# 去除NA值，确保数据的完整性
+rss = na.omit(rss) 
+
+# 可视化dotplot图
+# plotRSS函数用于生成Regulon特异性得分的dotplot图。
+# zThreshold参数设置用于筛选感兴趣的细胞类型的z-score阈值（此处设置为2），
+# cluster_columns控制是否对列进行聚类（此处不聚类），
+# order_rows决定是否对行进行排序（此处按行排序）。
+# thr参数设置最小阈值（此处为0.1），
+# varName指定绘图中展示的变量名称（此处为“cellType”），
+# col.low, col.mid, col.high分别表示低、中、高得分的颜色。
+rssPlot <- plotRSS(rss,
+                   zThreshold = 2, # 可调整z-score阈值
+                   cluster_columns = FALSE, # 不对列进行聚类
+                   order_rows = TRUE, # 按行排序
+                   thr = 0.1, # 设定得分阈值
+                   varName = "cellType", # 指定变量名称为cellType
+                   col.low = '#330066', # 设置低分颜色
+                   col.mid = '#66CC66', # 设置中等分数颜色
+                   col.high = '#FFCC33') # 设置高分颜色
+
+# 输出排序后的行顺序
+rssPlot$rowOrder
+
+# 通过plotly生成可交互的dotplot图
+plotly::ggplotly(rssPlot$plot)
+rssPlot$plot
+# 指定亚群中regulon的rank图
+# cowplot::plot_grid用于生成图形网格，展示多个图形，
+# plotRSS_oneSet函数用于绘制特定set的Regulon排名图，
+# setName参数通过计算细胞集群的名称来确定要显示的亚群，n=3表示绘制前三个Regulon。
+# 最后，使用nrow=2, byrow=T指定网格排布，按行排列。
+cowplot::plot_grid(plotRSS_oneSet(rss,
+                                   setName = table(sce@active.ident)[4] %>% names(), n = 3),
+                   NULL, NULL, nrow = 2, byrow = TRUE)
+# 计算Regulon特异性得分
+# 筛选出想要展示的调控子
+tfs <- c('GATA2(+)','KLF9(+)','MAX(+)','PRDM1(+)','NFE2(+)','USF2(+)','YY1(+)','ELK4(+)','FOXN2(+)','KLF4(+)','CAT(+)','HES1(+)','CUX1(+)','ZFX(+)','MAFB(+)','IRF5(+)','CBFB(+)','EOMES(+)','PHF8(+)','BACH2(+)','MYBL1(+)','TAF1(+)','TBX21(+)','CREB5(+)','CEBPA(+)','MEF2C(+)','REL(+)','STAT5A(+)','ZNF76(+)')
+# 可视化作图
+rss_data <- rss[which(rownames(rss)%in% tfs),]
+pheatmap(rss_data,fontsize=14, 
+                       fontsize_row = 10, 
+                       main = "RSS", 
+                       treeheight_col = 0,  border_color = NA)
+# 计算编码转录因子的基因表达情况
+tfgene <- c("CREB5","STAT5A","MEF2C","CBFB","HES1","CUX1",
+                "MAFB","CEBPA","EOMES","GATA2")
+gene_cell_exp <- AverageExpression(sce,
+                                       assays = 'RNA',
+                                       features = tfgene,
+                                       group.by ='ident',
+                                       slot = 'data') 
+gene_cell_exp <- as.data.frame(gene_cell_exp$RNA)
+marker_exp <- t(scale(t(gene_cell_exp),scale = T,center = T))
+# 可视化作图
+pheatmap(marker_exp,fontsize=14, 
+                       fontsize_row = 10, 
+                       main = "AverageExpression",
+                       treeheight_col = 0,border_color = NA)
+# 拿两个转录因子举例
+regulonsToPlot = c('TCF4(+)','NR2C1(+)')
+regulonsToPlot
+# 添加转录因子的活性打分到metadata中
+sce@meta.data = cbind(sce@meta.data ,t(sub_regulonAUC@assays@data$AUC[regulonsToPlot,]))
+# 可视化图
+DotPlot(sce, features = unique(regulonsToPlot)) + RotatedAxis()
+RidgePlot(sce, features =  regulonsToPlot , ncol = 1)
+VlnPlot(sce, features =  regulonsToPlot )
+FeaturePlot(sce, features =  regulonsToPlot )
+#将ELK4(+)中的靶基因提取出来
+genes <- regulons$`ELK4(+)`
+genes
+library(org.Hs.eg.db)
+library(clusterProfiler)
+ego <- enrichGO(gene = genes, OrgDb = "org.Hs.eg.db", keyType  = 'SYMBOL',ont="all")
+head(data.frame(ego))
+# GO富集结果保存
+write.csv(ego,file = "go_ELK4.csv")
+dotplot(ego)
+#人基因转换成ENTREZID
+genes_change <- bitr(genes, fromType = "SYMBOL", toType = "ENTREZID",OrgDb = org.Hs.eg.db)
+genes_ENTREZID <- genes_change$ENTREZID
+ego <- enrichKEGG(gene = genes_ENTREZID, organism = 'hsa',keyType = "kegg")
+head(data.frame(ego))
+#基因ID转换
+kegg <- setReadable(ego, OrgDb = org.Hs.eg.db, keyType="ENTREZID") #将基因的gene ID列的entrzeid转换成SYMBOL
+head(kegg)
+# KEGG富集结果保存
+write.csv(kegg,file = "kegg_ELK4.csv")
+dotplot(ego)
