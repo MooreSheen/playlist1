@@ -1,1 +1,89 @@
+# 载入所需软件包
+library(Seurat)
+library(tidyverse)
+library(SingleR)
+library(celldex)
+#获取celldex中的小鼠参考数据集
+Mouse.se=MouseRNAseqData()
+str(Mouse.se)
+# 读取测试数据集
+PRO <- readRDS("/vip_training/311/liumengjie/seurat/mussto.rds")
+DimPlot(PRO)
+# 提取标准化之后的矩阵
+data <- GetAssayData(PRO, layer="data")
+## singleR按cluster注释
+# 确保测试数据集当前的作图特征是机械分群
+Idents(PRO) <- 'seurat_clusters'
+# 执行注释，test参数：测试数据集； ref参数：参考数据集 ；cluster：测试数据集的ident ；labels ：使用的参考数据集的标签
+pred.cluster <- SingleR(test = data, ref = Mouse.se, clusters=Idents(PRO),labels = Mouse.se$label.main)  #按照细胞群进行注释
+str(pred.cluster)
+# 新建名为celltype的数据框：ClusterID列是分群信息，celltype_SR列是预测的细胞类型
+celltype <-data.frame(ClusterID=rownames(pred.cluster),celltype_SR=pred.cluster$labels,stringsAsFactors = F)
+# 将预测的细胞类型放入PRO的meta.data中，列名为celltype_R
+PRO[['celltype_R']]<- celltype$celltype_SR[match(Idents(PRO), celltype$ClusterID)]
+head(PRO@meta.data)
+# 绘图
+DimPlot(PRO, group.by = "celltype_R",reduction = "umap",label=TRUE)
+DimPlot(PRO,group.by = "seurat_clusters",reduction = "umap",label=TRUE)
+# 读取注释表格：表格第一列为机械分群，第二列为机械分群对应的细胞类型
+cell_ident_file <- read.table('anno.tsv' ,header = TRUE,sep="\t",stringsAsFactors=FALSE)
+# 调取第一列
+current_ident <- cell_ident_file[,1]
+# 调取第二列
+new_ident <- cell_ident_file[,2]
+# 把PRO的当前作图特征从机械分群改动到注释后的细胞类型
+PRO@active.ident <- plyr::mapvalues(x = PRO@active.ident, from = current_ident, to = new_ident)
+# 把当前的作图特征添加到meta.data数据框中，命名为新的一列，叫做celltype_anno
+PRO[["celltype_anno"]] <- Idents(object = PRO)
+## 调整以下步骤中的绘制图片的大小
+options(repr.plot.width = 12, repr.plot.height = 6)
+DimPlot(PRO, group.by = c("celltype_R","celltype_anno"),reduction = "umap",label=TRUE)
+## 提取成纤维细胞进行亚群细分
+pro1 <- subset(PRO,ident="Fib")
+pro1 <- FindVariableFeatures(pro1)
+pro1 <- ScaleData(pro1)
+pro1 <- RunPCA(object=pro1,features = VariableFeatures(object = pro1))
+ElbowPlot(pro1,ndims=50)
+pro1 <- FindNeighbors(pro1, reduction = "pca", dims = 1:20)
+pro1 <- FindClusters(pro1,resolution = 0.5)
+pro1 <- RunTSNE(object=pro1,dims.use=1:20,do.fast=TRUE,check_duplicates = FALSE)
+pro1 <- RunUMAP(pro1, reduction = "pca", dims = 1:20)
+DimPlot(pro1)
+head(pro1)
+# 成纤维亚群人工注释
+Idents(pro1)<-"seurat_clusters"
+celltype<-c("Fib_1","Fib_2","Fib_3","Fib_4","Fib_5","Fib_6","Fib_7") 
+names(celltype) <- levels(pro1) 
+pro1 <- RenameIdents(pro1, celltype) 
+pro1[["anno1"]] <- Idents(object = pro1)
+unique(pro1@meta.data$anno1)
+options(repr.plot.width = 6, repr.plot.height = 6)
+DimPlot(pro1)
+# 提取大类结果的meta.data数据框为meta
+meta <- PRO@meta.data   #PRO为原来的RDS
+# 将细胞名作为新的一列命名为cell_name
+meta$cell_name <- rownames(meta)
+# 将大类细胞注释结果作为新的一列命名为cluster
+meta$cluster <- as.character(PRO@active.ident)
+# 将cluster列提取出来命名成一个新的向量叫做ident
+ident <- meta$cluster
+# 给向量里面的每个值命名，名字是对应的barcode名
+names(ident) <- rownames(meta)
+#pro1为细分注释后获得的RDS
+# 将亚群细胞注释结果提取出来命名成一个新的向量叫做ident1
+ident1 <- as.character(pro1@active.ident)
+# 给向量里面的每个值命名，名字是对应的barcode名
+names(ident1) <- names(pro1@active.ident)
+# 以下循环目的：通过找大类和亚群相同的barcode，一旦发现，将亚群对应的细胞类型添加到ident这个向量中中，也就是完成细胞类型标签的替换
+for(i in names(ident1)){
+      if( i %in% meta$cell_name){
+        ident[i] <- ident1[i]}
+}
+# 将替换完成的向量添加到meta数据框中的cluster列
+meta$cluster <- ident
+# 将修改后的meta替换掉大类PRO的meta.data
+PRO@meta.data <- meta
+head(PRO)
+options(repr.plot.width = 6, repr.plot.height = 6)
+DimPlot(PRO,group.by = "cluster",reduction = "umap",label=TRUE)
 
