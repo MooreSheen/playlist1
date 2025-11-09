@@ -1,0 +1,30 @@
+library(CytoTRACE) #加载包
+results <- CytoTRACE(marrow_10x_expr)#使用自带骨髓 10x scRNA-seq 数据集运行 CytoTRACE
+results <- CytoTRACE(marrow_10x_expr, ncores = 8, subsamplesize = 1000) #使用“ncores”（默认值 = 1）进行多线程，“subsamplingsize”（默认值 = 1,000 个单元格）指示子采样大小
+options(repr.plot.width = 8, repr.plot.height = 6)
+#可视化 CytoTRACE 结果
+plotCytoTRACE(results, phenotype = marrow_10x_pheno)
+#可视化与 CytoTRACE 相关的基因
+plotCytoGenes(results, numOfGenes = 10)
+suppressMessages({
+library(Seurat)
+library(ggplot2)
+library(CytoTRACE)
+})
+#读取数据
+pbmc<-readRDS('/vip_training/ceshi/qijia1/CytoTRACE/PBMC.rds')
+head(pbmc@meta.data)
+DimPlot(pbmc,label = TRUE,repel = TRUE)
+#提取注释信息
+table(pbmc$seurat_annotations)
+phe <- pbmc$seurat_annotations
+phe = as.character(phe)
+names(phe) <- rownames(pbmc@meta.data)
+####提取表达矩阵
+mat <- as.matrix(pbmc@assays$RNA@counts)
+mat[1:4,1:4]
+results <- CytoTRACE(mat)
+#可视化 CytoTRACE 结果
+plotCytoTRACE(results, phenotype = phe)
+#可视化与 CytoTRACE 相关的基因
+plotCytoGenes(results, numOfGenes = 10)
